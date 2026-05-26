@@ -84,3 +84,16 @@ python -m pip install -e ".[dev]"
 pytest
 UPSTREAM_BASE_URL=https://api.openai.com uvicorn codex_reset_proxy.app:create_app --factory --host 127.0.0.1 --port 8788
 ```
+
+##  Thanks
+
+
+<p>
+  <a href="https://linux.do">
+    <img src="https://img.shields.io/badge/LinuxDo-community-1f6feb" alt="LinuxDo">
+  </a>
+</p>
+
+## License
+
+Apache License 2.0.
