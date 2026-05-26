@@ -1,0 +1,25 @@
+services:
+  codex-reset-proxy:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: "${PYTHON_IMAGE:-python:3.12-slim}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST-pypi.tuna.tsinghua.edu.cn}"
+        PIP_DEFAULT_TIMEOUT: "${PIP_DEFAULT_TIMEOUT:-120}"
+    ports:
+      - "${PROXY_PORT:-8788}:8000"
+    environment:
+      UPSTREAM_BASE_URL: "${UPSTREAM_BASE_URL:?set UPSTREAM_BASE_URL, for example https://api.openai.com}"
+      UPSTREAM_API_KEY: "${UPSTREAM_API_KEY:-}"
+      UPSTREAM_API_KEY_HEADER: "${UPSTREAM_API_KEY_HEADER:-Authorization}"
+      UPSTREAM_API_KEY_PREFIX: "${UPSTREAM_API_KEY_PREFIX-Bearer }"
+      RESPONSE_HEADER_TIMEOUT_SECONDS: "30"
+      UPSTREAM_MAX_ATTEMPTS: "2"
+      CONNECT_TIMEOUT_SECONDS: "10"
+      WRITE_TIMEOUT_SECONDS: "30"
+      POOL_TIMEOUT_SECONDS: "10"
+      MAX_REQUEST_BODY_BYTES: "33554432"
+      RETRY_BACKOFF_SECONDS: "0.25"
+      LOG_LEVEL: "INFO"
+    restart: unless-stopped

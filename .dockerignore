@@ -1,0 +1,14 @@
+.git/
+.ace-tool/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+*.pyc
+.coverage
+htmlcov/
+dist/
+build/
+.env
