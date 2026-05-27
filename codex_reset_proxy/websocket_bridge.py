@@ -29,11 +29,12 @@ WebSocketConnectFactory = Callable[[str, list[tuple[str, str]], Settings], Any]
 
 
 class WebSocketBridgeError(Exception):
-    def __init__(self, *, status_code: int, error_code: str, message: str) -> None:
+    def __init__(self, *, status_code: int, error_code: str, message: str, attempts: int = 1) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
         self.message = message
+        self.attempts = attempts
 
 
 @dataclass
@@ -42,6 +43,8 @@ class OpenedWebSocketBridge:
     context: Any
     url: str
     background_tasks: set[asyncio.Task[None]]
+    first_message: str | bytes | None = None
+    attempts: int = 1
     close_owned_by_background: bool = False
 
 
@@ -179,23 +182,117 @@ async def open_websocket_bridge(
     return OpenedWebSocketBridge(websocket=websocket, context=context, url=url, background_tasks=set())
 
 
+async def open_websocket_bridge_with_retries(
+    *,
+    settings: Settings,
+    connect_factory: WebSocketConnectFactory,
+    url: str,
+    headers: list[tuple[str, str]],
+    body: bytes,
+) -> OpenedWebSocketBridge:
+    last_error_code = "websocket_first_message_timeout"
+    last_status_code = 504
+    last_message = (
+        "upstream websocket did not return first message within "
+        f"{settings.websocket_first_message_timeout_seconds:g}s"
+    )
+
+    for attempt in range(1, settings.upstream_max_attempts + 1):
+        opened: OpenedWebSocketBridge | None = None
+        try:
+            opened = await open_websocket_bridge(
+                settings=settings,
+                connect_factory=connect_factory,
+                url=url,
+                headers=headers,
+                body=body,
+            )
+            opened.first_message = await asyncio.wait_for(
+                opened.websocket.recv(),
+                timeout=settings.websocket_first_message_timeout_seconds,
+            )
+            opened.attempts = attempt
+            logger.info(
+                "websocket first message received attempt=%s/%s url=%s",
+                attempt,
+                settings.upstream_max_attempts,
+                url,
+            )
+            return opened
+        except asyncio.TimeoutError:
+            last_error_code = "websocket_first_message_timeout"
+            last_status_code = 504
+            last_message = (
+                "upstream websocket did not return first message within "
+                f"{settings.websocket_first_message_timeout_seconds:g}s"
+            )
+            logger.warning(
+                "websocket first message timeout attempt=%s/%s url=%s",
+                attempt,
+                settings.upstream_max_attempts,
+                url,
+            )
+            if opened is not None:
+                await _close_context_quietly(opened.context)
+        except (OSError, WebSocketException) as exc:
+            last_error_code = "websocket_first_message_error"
+            last_status_code = 502
+            last_message = f"upstream websocket failed before first message: {exc.__class__.__name__}"
+            logger.warning(
+                "websocket first message error attempt=%s/%s error=%s url=%s",
+                attempt,
+                settings.upstream_max_attempts,
+                exc.__class__.__name__,
+                url,
+            )
+            if opened is not None:
+                await _close_context_quietly(opened.context)
+        except WebSocketBridgeError as exc:
+            if exc.status_code < 500:
+                raise WebSocketBridgeError(
+                    status_code=exc.status_code,
+                    error_code=exc.error_code,
+                    message=exc.message,
+                    attempts=attempt,
+                ) from exc
+            last_error_code = exc.error_code
+            last_status_code = exc.status_code
+            last_message = exc.message
+            if attempt >= settings.upstream_max_attempts:
+                break
+            logger.warning(
+                "websocket open failed attempt=%s/%s error=%s url=%s",
+                attempt,
+                settings.upstream_max_attempts,
+                exc.error_code,
+                url,
+            )
+
+        if attempt < settings.upstream_max_attempts and settings.retry_backoff_seconds:
+            await asyncio.sleep(settings.retry_backoff_seconds)
+
+    raise WebSocketBridgeError(
+        status_code=last_status_code,
+        error_code=last_error_code,
+        message=last_message,
+        attempts=settings.upstream_max_attempts,
+    )
+
+
 async def stream_websocket_as_sse(
     opened: OpenedWebSocketBridge,
     settings: Settings,
 ) -> AsyncIterator[bytes]:
-    first_message = True
     try:
         while True:
-            timeout = (
-                settings.websocket_first_message_timeout_seconds
-                if first_message
-                else settings.websocket_idle_timeout_seconds
-            )
-            message = await asyncio.wait_for(
-                opened.websocket.recv(),
-                timeout=timeout,
-            )
-            first_message = False
+            if opened.first_message is not None:
+                message = opened.first_message
+                opened.first_message = None
+            else:
+                message = await asyncio.wait_for(
+                    opened.websocket.recv(),
+                    timeout=settings.websocket_idle_timeout_seconds,
+                )
             text = _websocket_message_to_text(message)
             event_type = _event_type(text)
             completed_response_id = _completed_response_id(text)

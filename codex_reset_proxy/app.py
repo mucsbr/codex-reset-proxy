@@ -25,7 +25,7 @@ from codex_reset_proxy.websocket_bridge import (
     WebSocketConnectFactory,
     build_upstream_ws_url,
     default_websocket_connect_factory,
-    open_websocket_bridge,
+    open_websocket_bridge_with_retries,
     stream_websocket_as_sse,
     websocket_headers,
 )
@@ -55,7 +55,7 @@ async def proxy_endpoint(request: Request) -> Response:
         if request.method != "POST":
             return PlainTextResponse("websocket_per_request transport only supports POST\n", status_code=405)
         try:
-            opened_ws = await open_websocket_bridge(
+            opened_ws = await open_websocket_bridge_with_retries(
                 settings=settings,
                 connect_factory=websocket_connect_factory,
                 url=build_upstream_ws_url(upstream_url),
@@ -66,14 +66,20 @@ async def proxy_endpoint(request: Request) -> Response:
             return PlainTextResponse(
                 f"{exc.message}\n",
                 status_code=exc.status_code,
-                headers={"x-codex-reset-proxy-error": exc.error_code},
+                headers={
+                    "x-codex-reset-proxy-error": exc.error_code,
+                    "x-codex-reset-proxy-attempts": str(exc.attempts),
+                },
             )
 
         return StreamingResponse(
             stream_websocket_as_sse(opened_ws, settings),
             status_code=200,
             media_type="text/event-stream",
-            headers={"x-codex-reset-proxy-transport": "websocket_per_request"},
+            headers={
+                "x-codex-reset-proxy-transport": "websocket_per_request",
+                "x-codex-reset-proxy-attempts": str(opened_ws.attempts),
+            },
         )
 
     try:

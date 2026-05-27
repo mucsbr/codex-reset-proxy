@@ -25,7 +25,7 @@ from codex_reset_proxy.websocket_bridge import (
     WebSocketConnectFactory,
     build_upstream_ws_url,
     default_websocket_connect_factory,
-    open_websocket_bridge,
+    open_websocket_bridge_with_retries,
     stream_websocket_as_sse,
     websocket_headers,
 )
@@ -364,7 +364,7 @@ async def _write_websocket_bridge_response(
         return
 
     try:
-        opened_ws = await open_websocket_bridge(
+        opened_ws = await open_websocket_bridge_with_retries(
             settings=settings,
             connect_factory=websocket_connect_factory,
             url=build_upstream_ws_url(_upstream_url(settings, path)),
@@ -375,7 +375,10 @@ async def _write_websocket_bridge_response(
         await _write_fixed_response(
             writer,
             exc.status_code,
-            [(b"x-codex-reset-proxy-error", exc.error_code.encode("ascii"))],
+            [
+                (b"x-codex-reset-proxy-error", exc.error_code.encode("ascii")),
+                (b"x-codex-reset-proxy-attempts", str(exc.attempts).encode("ascii")),
+            ],
             f"{exc.message}\n".encode("utf-8"),
         )
         return
@@ -387,6 +390,7 @@ async def _write_websocket_bridge_response(
             (b"content-type", b"text/event-stream; charset=utf-8"),
             (b"cache-control", b"no-cache"),
             (b"x-codex-reset-proxy-transport", b"websocket_per_request"),
+            (b"x-codex-reset-proxy-attempts", str(opened_ws.attempts).encode("ascii")),
         ],
         stream_websocket_as_sse(opened_ws, settings),
     )

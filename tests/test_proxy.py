@@ -304,6 +304,7 @@ async def test_websocket_per_request_wraps_request_streams_sse_and_sends_process
 
     assert response.status_code == 200
     assert response.headers["x-codex-reset-proxy-transport"] == "websocket_per_request"
+    assert response.headers["x-codex-reset-proxy-attempts"] == "1"
     assert calls[0]["url"] == "wss://api.example.test/base/responses?foo=bar"
 
     header_names = {name.lower() for name, _ in calls[0]["headers"]}
@@ -390,8 +391,10 @@ async def test_websocket_per_request_first_message_uses_first_message_timeout():
     )
     websocket.recv_delay_seconds = 0.05
     context = FakeWebSocketContext(websocket)
+    calls: list[dict] = []
 
     def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        calls.append({"url": url, "headers": headers, "settings": settings})
         return context
 
     app = create_app(
@@ -400,18 +403,80 @@ async def test_websocket_per_request_first_message_uses_first_message_timeout():
             transport_mode="websocket_per_request",
             websocket_first_message_timeout_seconds=0.01,
             websocket_idle_timeout_seconds=1,
+            upstream_max_attempts=2,
+            retry_backoff_seconds=0,
         ),
         websocket_connect_factory=websocket_connect_factory,
     )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
-        with pytest.raises(TimeoutError):
-            await client.post(
-                "/responses",
-                json={"model": "gpt-test", "input": [], "stream": True},
-            )
+        response = await client.post(
+            "/responses",
+            json={"model": "gpt-test", "input": [], "stream": True},
+        )
 
+    assert response.status_code == 504
+    assert response.headers["x-codex-reset-proxy-error"] == "websocket_first_message_timeout"
+    assert response.headers["x-codex-reset-proxy-attempts"] == "2"
+    assert len(calls) == 2
     assert context.exited
+
+
+@pytest.mark.asyncio
+async def test_websocket_per_request_retries_until_first_message_before_streaming():
+    first_websocket = FakeWebSocket(
+        [
+            json.dumps({"type": "response.created", "response": {"id": "resp-timeout"}}),
+        ]
+    )
+    first_websocket.recv_delay_seconds = 0.05
+    second_websocket = FakeWebSocket(
+        [
+            json.dumps({"type": "response.created", "response": {"id": "resp-2"}}),
+            json.dumps({"type": "response.completed", "response": {"id": "resp-2"}}),
+        ]
+    )
+    contexts = [FakeWebSocketContext(first_websocket), FakeWebSocketContext(second_websocket)]
+    calls: list[dict] = []
+
+    def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        calls.append({"url": url, "headers": headers, "settings": settings})
+        return contexts[len(calls) - 1]
+
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test/base",
+            transport_mode="websocket_per_request",
+            websocket_first_message_timeout_seconds=0.01,
+            upstream_max_attempts=2,
+            retry_backoff_seconds=0,
+        ),
+        websocket_connect_factory=websocket_connect_factory,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        response = await client.post(
+            "/responses",
+            json={"model": "gpt-test", "input": [], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["x-codex-reset-proxy-attempts"] == "2"
+    assert len(calls) == 2
+    assert contexts[0].exited
+
+    for _ in range(10):
+        if contexts[1].exited:
+            break
+        await asyncio.sleep(0.01)
+
+    assert contexts[1].exited
+    assert json.loads(second_websocket.sent[1]) == {
+        "type": "response.processed",
+        "response_id": "resp-2",
+    }
+    assert "resp-timeout" not in response.text
+    assert "resp-2" in response.text
 
 
 @pytest.mark.asyncio
