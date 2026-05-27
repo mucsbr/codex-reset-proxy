@@ -26,6 +26,20 @@ You can also copy `.env.example` to `.env` and edit the values before running Co
 
 The proxy listens on `http://127.0.0.1:8788` by default. It forwards to `UPSTREAM_BASE_URL` and preserves the client request path and query string. For example, `http://127.0.0.1:8788/v1/chat/completions` becomes `${UPSTREAM_BASE_URL}/v1/chat/completions`.
 
+## Transport modes
+
+The default `TRANSPORT_MODE=http` is a generic HTTP reverse proxy. It works for OpenAI-compatible endpoints such as `/v1/chat/completions` and for Codex HTTP streaming endpoints.
+
+`TRANSPORT_MODE=websocket_per_request` is an experimental Codex Responses bridge:
+
+- each incoming HTTP `POST` opens one upstream WebSocket connection;
+- the upstream WebSocket URL is derived from `UPSTREAM_BASE_URL` plus the original path and query;
+- the HTTP JSON request body is wrapped as a WebSocket `response.create` message;
+- upstream WebSocket JSON messages are returned to the HTTP client as SSE events;
+- after `response.completed`, the proxy sends `response.processed` with the completed response id, then closes the WebSocket.
+
+This mode is only intended for the Codex Responses protocol. It is not a generic bridge for `/v1/chat/completions`. It also does not reduce connection count yet, because one HTTP request still creates one WebSocket connection. A later pooled mode would need to key long-lived WebSockets by auth/session headers and Codex thread/window headers.
+
 ## Configuration
 
 Environment variables:
@@ -37,11 +51,15 @@ Environment variables:
 | `UPSTREAM_API_KEY_HEADER` | `Authorization` | Header to write when `UPSTREAM_API_KEY` is set. |
 | `UPSTREAM_API_KEY_PREFIX` | `Bearer ` | Prefix used when writing `UPSTREAM_API_KEY`. OpenAI-compatible APIs usually use `Authorization: Bearer <key>`. |
 | `PROXY_PORT` | `8788` | Host port used by Docker Compose. |
+| `TRANSPORT_MODE` | `http` | `http` for normal reverse proxying, or `websocket_per_request` for the one-shot Codex Responses WS bridge. |
 | `RESPONSE_HEADER_TIMEOUT_SECONDS` | `30` | Per-attempt time limit for receiving upstream response headers. |
 | `UPSTREAM_MAX_ATTEMPTS` | `2` | Total attempts, including the first request. |
 | `CONNECT_TIMEOUT_SECONDS` | `10` | TCP/TLS connection timeout per attempt. |
 | `WRITE_TIMEOUT_SECONDS` | `30` | Timeout while sending the buffered request to upstream. |
 | `POOL_TIMEOUT_SECONDS` | `10` | httpx connection-pool acquisition timeout. |
+| `WEBSOCKET_IDLE_TIMEOUT_SECONDS` | `600` | Maximum idle wait for the next upstream WebSocket message in `websocket_per_request` mode. |
+| `WEBSOCKET_PROCESSED_TIMEOUT_SECONDS` | `10` | Timeout for sending `response.create` and `response.processed` WebSocket messages. |
+| `WEBSOCKET_SEND_RESPONSE_PROCESSED` | `true` | Whether to send `response.processed` after `response.completed` in `websocket_per_request` mode. |
 | `MAX_REQUEST_BODY_BYTES` | `33554432` | Maximum buffered request body size. |
 | `RETRY_BACKOFF_SECONDS` | `0.25` | Delay between failed pre-header attempts. |
 | `LOG_LEVEL` | `INFO` | Python logging level. |

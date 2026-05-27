@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterable
 
 import httpx
@@ -61,6 +62,32 @@ class FakeClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FakeWebSocket:
+    def __init__(self, messages: Iterable[str | bytes]) -> None:
+        self.messages = list(messages)
+        self.sent: list[str] = []
+
+    async def send(self, message: str) -> None:
+        self.sent.append(message)
+
+    async def recv(self) -> str | bytes:
+        if not self.messages:
+            raise AssertionError("unexpected websocket recv")
+        return self.messages.pop(0)
+
+
+class FakeWebSocketContext:
+    def __init__(self, websocket: FakeWebSocket) -> None:
+        self.websocket = websocket
+        self.exited = False
+
+    async def __aenter__(self) -> FakeWebSocket:
+        return self.websocket
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.exited = True
 
 
 @pytest.mark.asyncio
@@ -205,3 +232,106 @@ async def test_client_api_key_header_is_preserved_when_proxy_key_is_not_configur
     assert response.status_code == 200
     auth_headers = [(name, value) for name, value in calls[0]["headers"] if name.lower() == b"authorization"]
     assert auth_headers == [(b"authorization", b"Bearer client-key")]
+
+
+@pytest.mark.asyncio
+async def test_websocket_per_request_wraps_request_streams_sse_and_sends_processed():
+    websocket = FakeWebSocket(
+        [
+            json.dumps({"type": "response.created", "response": {"id": "resp-1"}}),
+            json.dumps({"type": "response.completed", "response": {"id": "resp-1"}}),
+        ]
+    )
+    context = FakeWebSocketContext(websocket)
+    calls: list[dict] = []
+
+    def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        calls.append({"url": url, "headers": headers, "settings": settings})
+        return context
+
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test/base",
+            transport_mode="websocket_per_request",
+        ),
+        websocket_connect_factory=websocket_connect_factory,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        response = await client.post(
+            "/responses?foo=bar",
+            headers={
+                "authorization": "Bearer client-key",
+                "content-type": "application/json",
+                "session-id": "session-1",
+                "thread-id": "thread-1",
+            },
+            json={"model": "gpt-test", "input": [], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["x-codex-reset-proxy-transport"] == "websocket_per_request"
+    assert calls[0]["url"] == "wss://api.example.test/base/responses?foo=bar"
+
+    header_names = {name.lower() for name, _ in calls[0]["headers"]}
+    assert "authorization" in header_names
+    assert "session-id" in header_names
+    assert "thread-id" in header_names
+    assert "content-type" not in header_names
+    assert "content-length" not in header_names
+
+    sent_create = json.loads(websocket.sent[0])
+    assert sent_create == {
+        "type": "response.create",
+        "model": "gpt-test",
+        "input": [],
+        "stream": True,
+    }
+    assert json.loads(websocket.sent[1]) == {
+        "type": "response.processed",
+        "response_id": "resp-1",
+    }
+    assert context.exited
+
+    assert "event: response.created\n" in response.text
+    assert "event: response.completed\n" in response.text
+    assert 'data: {"type": "response.completed", "response": {"id": "resp-1"}}\n\n' in response.text
+
+
+@pytest.mark.asyncio
+async def test_websocket_per_request_rejects_invalid_json_before_connecting():
+    calls: list[dict] = []
+
+    def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        calls.append({"url": url, "headers": headers, "settings": settings})
+        raise AssertionError("websocket should not be opened for invalid JSON")
+
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test",
+            transport_mode="websocket_per_request",
+        ),
+        websocket_connect_factory=websocket_connect_factory,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        response = await client.post("/responses", content=b"{not-json")
+
+    assert response.status_code == 400
+    assert response.headers["x-codex-reset-proxy-error"] == "invalid_request_json"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_websocket_per_request_rejects_non_post_methods():
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test",
+            transport_mode="websocket_per_request",
+        )
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        response = await client.get("/responses")
+
+    assert response.status_code == 405
