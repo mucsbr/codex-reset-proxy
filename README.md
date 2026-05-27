@@ -57,7 +57,7 @@ To reinstall the generated CA into a rebuilt Alpine client container:
 If the client container is on another Docker host, run it from the machine that has `./certs/ca.crt`:
 
 ```bash
-./scripts/install-ca-into-container.sh --host asants@10.255.200.17 --container cli-proxy-api --ca ./certs/ca.crt
+./scripts/install-ca-into-container.sh --host user@192.168.0.1 --container cli-proxy-api --ca ./certs/ca.crt
 ```
 
 The script switches Alpine repositories to the Tsinghua mirror by default, installs `ca-certificates` if needed, runs `update-ca-certificates`, and verifies that the CA is present in the container bundle.
