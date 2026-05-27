@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import logging
-import sys
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
@@ -42,6 +41,8 @@ class OpenedWebSocketBridge:
     websocket: Any
     context: Any
     url: str
+    background_tasks: set[asyncio.Task[None]]
+    close_owned_by_background: bool = False
 
 
 async def default_websocket_connect_factory(
@@ -175,16 +176,13 @@ async def open_websocket_bridge(
         ) from exc
 
     logger.info("websocket response.create sent url=%s", url)
-    return OpenedWebSocketBridge(websocket=websocket, context=context, url=url)
+    return OpenedWebSocketBridge(websocket=websocket, context=context, url=url, background_tasks=set())
 
 
 async def stream_websocket_as_sse(
     opened: OpenedWebSocketBridge,
     settings: Settings,
 ) -> AsyncIterator[bytes]:
-    exc_info = (None, None, None)
-    completed_response_id: str | None = None
-
     try:
         while True:
             message = await asyncio.wait_for(
@@ -193,17 +191,41 @@ async def stream_websocket_as_sse(
             )
             text = _websocket_message_to_text(message)
             event_type = _event_type(text)
+            completed_response_id = _completed_response_id(text)
+
             yield _format_sse(event_type, text)
 
-            completed_response_id = _completed_response_id(text)
             if completed_response_id:
-                await _send_response_processed(opened, settings, completed_response_id)
-                break
-    except BaseException:
-        exc_info = sys.exc_info()
-        raise
+                _schedule_response_processed(opened, settings, completed_response_id)
+                return
     finally:
-        await opened.context.__aexit__(*exc_info)
+        if not opened.close_owned_by_background:
+            await _close_context_quietly(opened.context)
+
+
+def _schedule_response_processed(
+    opened: OpenedWebSocketBridge,
+    settings: Settings,
+    response_id: str,
+) -> None:
+    opened.close_owned_by_background = True
+    if not settings.websocket_send_response_processed:
+        task = asyncio.create_task(_close_context_quietly(opened.context))
+    else:
+        task = asyncio.create_task(_send_response_processed_and_close(opened, settings, response_id))
+    opened.background_tasks.add(task)
+    task.add_done_callback(opened.background_tasks.discard)
+
+
+async def _send_response_processed_and_close(
+    opened: OpenedWebSocketBridge,
+    settings: Settings,
+    response_id: str,
+) -> None:
+    try:
+        await _send_response_processed(opened, settings, response_id)
+    finally:
+        await _close_context_quietly(opened.context)
 
 
 def _websocket_message_to_text(message: str | bytes) -> str:

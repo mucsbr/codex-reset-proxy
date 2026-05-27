@@ -72,7 +72,7 @@ The default `TRANSPORT_MODE=http` is a generic HTTP reverse proxy. It works for 
 - the upstream WebSocket URL is derived from `UPSTREAM_BASE_URL` plus the original path and query;
 - the HTTP JSON request body is wrapped as a WebSocket `response.create` message;
 - upstream WebSocket JSON messages are returned to the HTTP client as SSE events;
-- after `response.completed`, the proxy sends `response.processed` with the completed response id, then closes the WebSocket.
+- after `response.completed` is returned to the HTTP client, the proxy ends the client stream and sends `response.processed` to the upstream WebSocket in the background.
 
 This mode is only intended for the Codex Responses protocol. It is not a generic bridge for `/v1/chat/completions`. It also does not reduce connection count yet, because one HTTP request still creates one WebSocket connection. A later pooled mode would need to key long-lived WebSockets by auth/session headers and Codex thread/window headers.
 

@@ -75,8 +75,13 @@ class FakeWebSocket:
     def __init__(self, messages: Iterable[str | bytes]) -> None:
         self.messages = list(messages)
         self.sent: list[str] = []
+        self.allow_send = asyncio.Event()
+        self.allow_send.set()
+        self.block_send_number: int | None = None
 
     async def send(self, message: str) -> None:
+        if self.block_send_number == len(self.sent) + 1:
+            await self.allow_send.wait()
         self.sent.append(message)
 
     async def recv(self) -> str | bytes:
@@ -321,6 +326,56 @@ async def test_websocket_per_request_wraps_request_streams_sse_and_sends_process
     assert "event: response.created\n" in response.text
     assert "event: response.completed\n" in response.text
     assert 'data: {"type": "response.completed", "response": {"id": "resp-1"}}\n\n' in response.text
+
+
+@pytest.mark.asyncio
+async def test_websocket_per_request_finishes_client_stream_before_processed_ack():
+    websocket = FakeWebSocket(
+        [
+            json.dumps({"type": "response.completed", "response": {"id": "resp-1"}}),
+        ]
+    )
+    websocket.block_send_number = 2
+    websocket.allow_send.clear()
+    context = FakeWebSocketContext(websocket)
+
+    def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        return context
+
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test/base",
+            transport_mode="websocket_per_request",
+        ),
+        websocket_connect_factory=websocket_connect_factory,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        response_task = asyncio.create_task(
+            client.post(
+                "/responses",
+                json={"model": "gpt-test", "input": [], "stream": True},
+            )
+        )
+        await asyncio.sleep(0)
+        response = await asyncio.wait_for(response_task, timeout=1)
+
+    assert response.status_code == 200
+    assert "event: response.completed\n" in response.text
+    assert len(websocket.sent) == 1
+    assert not context.exited
+
+    websocket.allow_send.set()
+    for _ in range(10):
+        if context.exited:
+            break
+        await asyncio.sleep(0.01)
+
+    assert json.loads(websocket.sent[1]) == {
+        "type": "response.processed",
+        "response_id": "resp-1",
+    }
+    assert context.exited
 
 
 @pytest.mark.asyncio
