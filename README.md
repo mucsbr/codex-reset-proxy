@@ -26,6 +26,28 @@ You can also copy `.env.example` to `.env` and edit the values before running Co
 
 The proxy listens on `http://127.0.0.1:8788` by default. It forwards to `UPSTREAM_BASE_URL` and preserves the client request path and query string. For example, `http://127.0.0.1:8788/v1/chat/completions` becomes `${UPSTREAM_BASE_URL}/v1/chat/completions`.
 
+## SOCKS5 MITM mode
+
+For clients that hard-code `https://chatgpt.com/backend-api/codex/responses` but allow a global SOCKS5 proxy, run the service as a SOCKS5 MITM proxy:
+
+```bash
+UPSTREAM_BASE_URL=https://chatgpt.com \
+LISTEN_PROTOCOL=socks5_mitm \
+OUTBOUND_PROXY=socks5://10.255.200.17:7897 \
+TRANSPORT_MODE=http \
+docker compose up --build
+```
+
+Then point the client proxy setting at:
+
+```text
+socks5://127.0.0.1:8788
+```
+
+The proxy generates a local CA at `./certs/ca.crt` by default. Install that CA into the client trust store before using `socks5_mitm`; otherwise HTTPS certificate verification will fail. `socks5_mitm` only decrypts `INTERCEPT_HOST:443`. Within that host, only `INTERCEPT_PATHS` get the special HTTP fast-fail or WS bridge behavior; other paths are forwarded as ordinary HTTP. Other SOCKS5 CONNECT hosts are tunneled through `OUTBOUND_PROXY` unchanged.
+
+`TRANSPORT_MODE=http` keeps the existing 30s response-header fast-fail and retry behavior after MITM decrypts the request. `TRANSPORT_MODE=websocket_per_request` converts intercepted Codex Responses HTTP requests into one-shot upstream WebSocket requests.
+
 ## Transport modes
 
 The default `TRANSPORT_MODE=http` is a generic HTTP reverse proxy. It works for OpenAI-compatible endpoints such as `/v1/chat/completions` and for Codex HTTP streaming endpoints.
@@ -51,7 +73,15 @@ Environment variables:
 | `UPSTREAM_API_KEY_HEADER` | `Authorization` | Header to write when `UPSTREAM_API_KEY` is set. |
 | `UPSTREAM_API_KEY_PREFIX` | `Bearer ` | Prefix used when writing `UPSTREAM_API_KEY`. OpenAI-compatible APIs usually use `Authorization: Bearer <key>`. |
 | `PROXY_PORT` | `8788` | Host port used by Docker Compose. |
+| `LISTEN_PROTOCOL` | `http_reverse` | `http_reverse`, `socks5_tunnel`, or `socks5_mitm`. |
+| `LISTEN_HOST` | `0.0.0.0` | Address to bind inside the container or local process. |
+| `LISTEN_PORT` | `8000` | Port to bind inside the container or local process. Compose maps `PROXY_PORT` to this. |
+| `OUTBOUND_PROXY` | unset | Optional upstream network exit. Currently supports `socks5://host:port` or `socks5h://host:port`. |
 | `TRANSPORT_MODE` | `http` | `http` for normal reverse proxying, or `websocket_per_request` for the one-shot Codex Responses WS bridge. |
+| `INTERCEPT_HOST` | upstream host | Host intercepted by `socks5_mitm`, usually `chatgpt.com`. |
+| `INTERCEPT_PATHS` | `/backend-api/codex/responses` | Comma-separated origin paths intercepted by `socks5_mitm`. |
+| `MITM_CERT_DIR` | `/data/certs` | Directory inside the container where the generated CA and leaf certificates are stored. |
+| `MITM_CERT_DIR_HOST` | `./certs` | Host directory mounted to `MITM_CERT_DIR` by Docker Compose. |
 | `RESPONSE_HEADER_TIMEOUT_SECONDS` | `30` | Per-attempt time limit for receiving upstream response headers. |
 | `UPSTREAM_MAX_ATTEMPTS` | `2` | Total attempts, including the first request. |
 | `CONNECT_TIMEOUT_SECONDS` | `10` | TCP/TLS connection timeout per attempt. |
@@ -100,7 +130,7 @@ PYTHON_IMAGE=<your-mirror>/python:3.12-slim docker compose build
 ```bash
 python -m pip install -e ".[dev]"
 pytest
-UPSTREAM_BASE_URL=https://api.openai.com uvicorn codex_reset_proxy.app:create_app --factory --host 127.0.0.1 --port 8788
+UPSTREAM_BASE_URL=https://api.openai.com LISTEN_HOST=127.0.0.1 LISTEN_PORT=8788 python -m codex_reset_proxy.server
 ```
 
 ##  Thanks

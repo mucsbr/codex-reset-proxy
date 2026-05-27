@@ -9,12 +9,21 @@ services:
         PIP_DEFAULT_TIMEOUT: "${PIP_DEFAULT_TIMEOUT:-120}"
     ports:
       - "${PROXY_PORT:-8788}:8000"
+    volumes:
+      - "${MITM_CERT_DIR_HOST:-./certs}:/data/certs"
     environment:
       UPSTREAM_BASE_URL: "${UPSTREAM_BASE_URL:?set UPSTREAM_BASE_URL, for example https://api.openai.com}"
       UPSTREAM_API_KEY: "${UPSTREAM_API_KEY:-}"
       UPSTREAM_API_KEY_HEADER: "${UPSTREAM_API_KEY_HEADER:-Authorization}"
       UPSTREAM_API_KEY_PREFIX: "${UPSTREAM_API_KEY_PREFIX-Bearer }"
+      LISTEN_PROTOCOL: "${LISTEN_PROTOCOL:-http_reverse}"
+      LISTEN_HOST: "0.0.0.0"
+      LISTEN_PORT: "8000"
+      OUTBOUND_PROXY: "${OUTBOUND_PROXY:-}"
       TRANSPORT_MODE: "${TRANSPORT_MODE:-http}"
+      INTERCEPT_HOST: "${INTERCEPT_HOST:-}"
+      INTERCEPT_PATHS: "${INTERCEPT_PATHS:-/backend-api/codex/responses}"
+      MITM_CERT_DIR: "/data/certs"
       RESPONSE_HEADER_TIMEOUT_SECONDS: "30"
       UPSTREAM_MAX_ATTEMPTS: "2"
       CONNECT_TIMEOUT_SECONDS: "10"

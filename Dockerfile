@@ -21,4 +21,4 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
 
 EXPOSE 8000
 
-CMD ["uvicorn", "codex_reset_proxy.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+CMD ["python", "-m", "codex_reset_proxy.server"]

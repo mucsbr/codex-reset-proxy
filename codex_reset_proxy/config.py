@@ -11,7 +11,14 @@ class Settings:
     upstream_api_key: str | None = None
     upstream_api_key_header: str = "Authorization"
     upstream_api_key_prefix: str = "Bearer "
+    listen_protocol: str = "http_reverse"
+    listen_host: str = "0.0.0.0"
+    listen_port: int = 8000
+    outbound_proxy: str | None = None
     transport_mode: str = "http"
+    intercept_host: str = ""
+    intercept_paths: tuple[str, ...] = ("/backend-api/codex/responses",)
+    mitm_cert_dir: str = "/data/certs"
     response_header_timeout_seconds: float = 30.0
     upstream_max_attempts: int = 2
     connect_timeout_seconds: float = 10.0
@@ -28,9 +35,19 @@ class Settings:
     def from_env(cls) -> "Settings":
         upstream_base_url = _env_required("UPSTREAM_BASE_URL").rstrip("/")
         _validate_upstream_base_url(upstream_base_url)
+        default_intercept_host = urlsplit(upstream_base_url).hostname or ""
+
         upstream_api_key_header = _env_str("UPSTREAM_API_KEY_HEADER", cls.upstream_api_key_header).strip()
         if not upstream_api_key_header:
             raise ValueError("UPSTREAM_API_KEY_HEADER cannot be empty")
+
+        listen_protocol = _env_str("LISTEN_PROTOCOL", cls.listen_protocol)
+        _validate_listen_protocol(listen_protocol)
+
+        outbound_proxy = _env_optional("OUTBOUND_PROXY")
+        if outbound_proxy:
+            _validate_outbound_proxy(outbound_proxy)
+
         transport_mode = _env_str("TRANSPORT_MODE", cls.transport_mode)
         _validate_transport_mode(transport_mode)
 
@@ -39,7 +56,14 @@ class Settings:
             upstream_api_key=_env_optional("UPSTREAM_API_KEY"),
             upstream_api_key_header=upstream_api_key_header,
             upstream_api_key_prefix=_env_str("UPSTREAM_API_KEY_PREFIX", cls.upstream_api_key_prefix),
+            listen_protocol=listen_protocol,
+            listen_host=_env_str("LISTEN_HOST", cls.listen_host),
+            listen_port=max(1, _env_int("LISTEN_PORT", cls.listen_port)),
+            outbound_proxy=outbound_proxy,
             transport_mode=transport_mode,
+            intercept_host=_env_str("INTERCEPT_HOST", default_intercept_host).lower(),
+            intercept_paths=_env_csv_tuple("INTERCEPT_PATHS", cls.intercept_paths),
+            mitm_cert_dir=_env_str("MITM_CERT_DIR", cls.mitm_cert_dir),
             response_header_timeout_seconds=_env_float(
                 "RESPONSE_HEADER_TIMEOUT_SECONDS",
                 cls.response_header_timeout_seconds,
@@ -111,10 +135,31 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _env_csv_tuple(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    parsed = tuple(item.strip() for item in value.split(",") if item.strip())
+    if not parsed:
+        raise ValueError(f"{name} cannot be empty")
+    return parsed
+
+
 def _validate_upstream_base_url(value: str) -> None:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("UPSTREAM_BASE_URL must be an absolute http:// or https:// URL")
+
+
+def _validate_listen_protocol(value: str) -> None:
+    if value not in {"http_reverse", "socks5_tunnel", "socks5_mitm"}:
+        raise ValueError("LISTEN_PROTOCOL must be one of: http_reverse, socks5_tunnel, socks5_mitm")
+
+
+def _validate_outbound_proxy(value: str) -> None:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"socks5", "socks5h"} or not parsed.hostname or not parsed.port:
+        raise ValueError("OUTBOUND_PROXY must be an absolute socks5:// or socks5h:// URL with host and port")
 
 
 def _validate_transport_mode(value: str) -> None:

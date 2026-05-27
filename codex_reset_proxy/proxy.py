@@ -60,7 +60,11 @@ def default_client_factory(settings: Settings) -> httpx.AsyncClient:
         write=settings.write_timeout_seconds,
         pool=settings.pool_timeout_seconds,
     )
-    return httpx.AsyncClient(timeout=timeout, follow_redirects=False)
+    return httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=False,
+        proxy=settings.outbound_proxy,
+    )
 
 
 async def read_limited_body(request: Request, limit: int) -> bytes:
@@ -88,7 +92,14 @@ def build_upstream_url(settings: Settings, request: Request) -> str:
 
 
 def filtered_request_headers(settings: Settings, request: Request) -> list[tuple[bytes, bytes]]:
-    headers = _filter_raw_headers(request.headers.raw, extra_skip=REQUEST_ONLY_HEADERS)
+    return filtered_request_headers_from_raw(settings, request.headers.raw)
+
+
+def filtered_request_headers_from_raw(
+    settings: Settings,
+    raw_headers: list[tuple[bytes, bytes]],
+) -> list[tuple[bytes, bytes]]:
+    headers = _filter_raw_headers(raw_headers, extra_skip=REQUEST_ONLY_HEADERS)
     if not settings.upstream_api_key:
         return headers
 

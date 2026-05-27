@@ -9,7 +9,8 @@ description = "A conservative reverse proxy that fast-fails and retries upstream
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "httpx>=0.28,<1",
+    "cryptography>=42,<47",
+    "httpx[socks]>=0.28,<1",
     "starlette>=0.46,<1",
     "uvicorn[standard]>=0.34,<1",
     "websockets>=13,<16",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import sys
@@ -14,6 +15,7 @@ from websockets.asyncio.client import connect as websockets_connect
 from websockets.exceptions import WebSocketException
 
 from codex_reset_proxy.config import Settings
+from codex_reset_proxy.outbound import open_socks5_socket
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +44,30 @@ class OpenedWebSocketBridge:
     url: str
 
 
-def default_websocket_connect_factory(
+async def default_websocket_connect_factory(
     url: str,
     headers: list[tuple[str, str]],
     settings: Settings,
 ) -> Any:
+    kwargs: dict[str, Any] = {}
+    if settings.outbound_proxy:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        if not host:
+            raise WebSocketBridgeError(
+                status_code=500,
+                error_code="invalid_websocket_url",
+                message="websocket URL must include a host",
+            )
+        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        kwargs["sock"] = await asyncio.to_thread(
+            open_socks5_socket,
+            settings.outbound_proxy,
+            host,
+            port,
+            settings.connect_timeout_seconds,
+        )
+
     return websockets_connect(
         url,
         additional_headers=headers,
@@ -56,6 +77,7 @@ def default_websocket_connect_factory(
         close_timeout=10,
         max_size=None,
         user_agent_header=None,
+        **kwargs,
     )
 
 
@@ -121,6 +143,8 @@ async def open_websocket_bridge(
 ) -> OpenedWebSocketBridge:
     request = build_response_create_request(body)
     context = connect_factory(url, headers, settings)
+    if inspect.isawaitable(context):
+        context = await context
 
     try:
         websocket = await context.__aenter__()
