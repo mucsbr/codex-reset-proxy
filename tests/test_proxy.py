@@ -9,6 +9,7 @@ import pytest
 
 from codex_reset_proxy.app import create_app
 from codex_reset_proxy.config import Settings
+from codex_reset_proxy.proxy import OpenedUpstream, stream_upstream_body
 
 
 class FakeResponse:
@@ -22,10 +23,14 @@ class FakeResponse:
         self.status_code = status_code
         self.headers = httpx.Headers(headers or [(b"content-type", b"text/plain")])
         self._chunks = list(chunks)
+        self.closed = False
 
     async def aiter_raw(self):
         for chunk in self._chunks:
             yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class FakeStreamContext:
@@ -33,6 +38,7 @@ class FakeStreamContext:
         self.response = response or FakeResponse()
         self.header_delay = header_delay
         self.exited = False
+        self.exit_exc_type = None
 
     async def __aenter__(self):
         if self.header_delay:
@@ -41,6 +47,7 @@ class FakeStreamContext:
 
     async def __aexit__(self, exc_type, exc, tb):
         self.exited = True
+        self.exit_exc_type = exc_type
 
 
 class FakeClient:
@@ -232,6 +239,24 @@ async def test_client_api_key_header_is_preserved_when_proxy_key_is_not_configur
     assert response.status_code == 200
     auth_headers = [(name, value) for name, value in calls[0]["headers"] if name.lower() == b"authorization"]
     assert auth_headers == [(b"authorization", b"Bearer client-key")]
+
+
+@pytest.mark.asyncio
+async def test_stream_upstream_body_closes_without_throwing_generator_exit_into_context():
+    calls: list[dict] = []
+    response = FakeResponse(chunks=(b"one", b"two"))
+    context = FakeStreamContext(response=response)
+    client = FakeClient(context, calls)
+    opened = OpenedUpstream(response=response, stream_context=context, client=client, attempts=1)
+
+    stream = stream_upstream_body(opened)
+    assert await anext(stream) == b"one"
+    await stream.aclose()
+
+    assert response.closed
+    assert context.exited
+    assert context.exit_exc_type is None
+    assert client.closed
 
 
 @pytest.mark.asyncio

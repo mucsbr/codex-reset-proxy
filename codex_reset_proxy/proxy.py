@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -232,13 +231,23 @@ async def open_upstream_with_retries(
 
 
 async def stream_upstream_body(opened: OpenedUpstream) -> AsyncIterator[bytes]:
-    exc_info = (None, None, None)
     try:
         async for chunk in opened.response.aiter_raw():
             yield chunk
-    except BaseException:
-        exc_info = sys.exc_info()
-        raise
     finally:
-        await opened.stream_context.__aexit__(*exc_info)
+        await close_upstream(opened)
+
+
+async def close_upstream(opened: OpenedUpstream) -> None:
+    response_aclose = getattr(opened.response, "aclose", None)
+    if response_aclose is not None:
+        await response_aclose()
+
+    try:
+        await opened.stream_context.__aexit__(None, None, None)
+    except RuntimeError as exc:
+        if "asynchronous generator is already running" not in str(exc):
+            raise
+        logger.debug("httpx stream context was already closing", exc_info=True)
+    finally:
         await opened.client.aclose()
