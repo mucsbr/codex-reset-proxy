@@ -48,6 +48,20 @@ The proxy generates a local CA at `./certs/ca.crt` by default. Install that CA i
 
 `TRANSPORT_MODE=http` keeps the existing 30s response-header fast-fail and retry behavior after MITM decrypts the request. `TRANSPORT_MODE=websocket_per_request` converts intercepted Codex Responses HTTP requests into one-shot upstream WebSocket requests.
 
+To reinstall the generated CA into a rebuilt Alpine client container:
+
+```bash
+./scripts/install-ca-into-container.sh --container cli-proxy-api --ca ./certs/ca.crt
+```
+
+If the client container is on another Docker host, run it from the machine that has `./certs/ca.crt`:
+
+```bash
+./scripts/install-ca-into-container.sh --host asants@10.255.200.17 --container cli-proxy-api --ca ./certs/ca.crt
+```
+
+The script switches Alpine repositories to the Tsinghua mirror by default, installs `ca-certificates` if needed, runs `update-ca-certificates`, and verifies that the CA is present in the container bundle.
+
 ## Transport modes
 
 The default `TRANSPORT_MODE=http` is a generic HTTP reverse proxy. It works for OpenAI-compatible endpoints such as `/v1/chat/completions` and for Codex HTTP streaming endpoints.
