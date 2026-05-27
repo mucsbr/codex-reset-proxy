@@ -101,6 +101,7 @@ Environment variables:
 | `CONNECT_TIMEOUT_SECONDS` | `10` | TCP/TLS connection timeout per attempt. |
 | `WRITE_TIMEOUT_SECONDS` | `30` | Timeout while sending the buffered request to upstream. |
 | `POOL_TIMEOUT_SECONDS` | `10` | httpx connection-pool acquisition timeout. |
+| `WEBSOCKET_FIRST_MESSAGE_TIMEOUT_SECONDS` | `30` | In `websocket_per_request` mode, maximum wait for the first upstream WebSocket message after `response.create` is sent. |
 | `WEBSOCKET_IDLE_TIMEOUT_SECONDS` | `600` | Maximum idle wait for the next upstream WebSocket message in `websocket_per_request` mode. |
 | `WEBSOCKET_PROCESSED_TIMEOUT_SECONDS` | `10` | Timeout for sending `response.create` and `response.processed` WebSocket messages. |
 | `WEBSOCKET_SEND_RESPONSE_PROCESSED` | `true` | Whether to send `response.processed` after `response.completed` in `websocket_per_request` mode. |

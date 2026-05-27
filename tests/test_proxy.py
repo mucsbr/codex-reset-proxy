@@ -78,6 +78,7 @@ class FakeWebSocket:
         self.allow_send = asyncio.Event()
         self.allow_send.set()
         self.block_send_number: int | None = None
+        self.recv_delay_seconds = 0.0
 
     async def send(self, message: str) -> None:
         if self.block_send_number == len(self.sent) + 1:
@@ -85,6 +86,8 @@ class FakeWebSocket:
         self.sent.append(message)
 
     async def recv(self) -> str | bytes:
+        if self.recv_delay_seconds:
+            await asyncio.sleep(self.recv_delay_seconds)
         if not self.messages:
             raise AssertionError("unexpected websocket recv")
         return self.messages.pop(0)
@@ -375,6 +378,39 @@ async def test_websocket_per_request_finishes_client_stream_before_processed_ack
         "type": "response.processed",
         "response_id": "resp-1",
     }
+    assert context.exited
+
+
+@pytest.mark.asyncio
+async def test_websocket_per_request_first_message_uses_first_message_timeout():
+    websocket = FakeWebSocket(
+        [
+            json.dumps({"type": "response.created", "response": {"id": "resp-1"}}),
+        ]
+    )
+    websocket.recv_delay_seconds = 0.05
+    context = FakeWebSocketContext(websocket)
+
+    def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        return context
+
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test/base",
+            transport_mode="websocket_per_request",
+            websocket_first_message_timeout_seconds=0.01,
+            websocket_idle_timeout_seconds=1,
+        ),
+        websocket_connect_factory=websocket_connect_factory,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        with pytest.raises(TimeoutError):
+            await client.post(
+                "/responses",
+                json={"model": "gpt-test", "input": [], "stream": True},
+            )
+
     assert context.exited
 
 

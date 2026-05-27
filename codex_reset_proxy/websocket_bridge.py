@@ -183,12 +183,19 @@ async def stream_websocket_as_sse(
     opened: OpenedWebSocketBridge,
     settings: Settings,
 ) -> AsyncIterator[bytes]:
+    first_message = True
     try:
         while True:
+            timeout = (
+                settings.websocket_first_message_timeout_seconds
+                if first_message
+                else settings.websocket_idle_timeout_seconds
+            )
             message = await asyncio.wait_for(
                 opened.websocket.recv(),
-                timeout=settings.websocket_idle_timeout_seconds,
+                timeout=timeout,
             )
+            first_message = False
             text = _websocket_message_to_text(message)
             event_type = _event_type(text)
             completed_response_id = _completed_response_id(text)

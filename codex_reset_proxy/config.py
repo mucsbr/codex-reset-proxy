@@ -24,6 +24,7 @@ class Settings:
     connect_timeout_seconds: float = 10.0
     write_timeout_seconds: float = 30.0
     pool_timeout_seconds: float = 10.0
+    websocket_first_message_timeout_seconds: float = 30.0
     websocket_idle_timeout_seconds: float = 600.0
     websocket_processed_timeout_seconds: float = 10.0
     websocket_send_response_processed: bool = True
@@ -72,6 +73,10 @@ class Settings:
             connect_timeout_seconds=_env_float("CONNECT_TIMEOUT_SECONDS", cls.connect_timeout_seconds),
             write_timeout_seconds=_env_float("WRITE_TIMEOUT_SECONDS", cls.write_timeout_seconds),
             pool_timeout_seconds=_env_float("POOL_TIMEOUT_SECONDS", cls.pool_timeout_seconds),
+            websocket_first_message_timeout_seconds=_env_float(
+                "WEBSOCKET_FIRST_MESSAGE_TIMEOUT_SECONDS",
+                cls.websocket_first_message_timeout_seconds,
+            ),
             websocket_idle_timeout_seconds=_env_float(
                 "WEBSOCKET_IDLE_TIMEOUT_SECONDS",
                 cls.websocket_idle_timeout_seconds,
