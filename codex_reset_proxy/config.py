@@ -28,6 +28,21 @@ class Settings:
     websocket_idle_timeout_seconds: float = 600.0
     websocket_processed_timeout_seconds: float = 10.0
     websocket_send_response_processed: bool = True
+    websocket_pool_enabled: bool = False
+    websocket_pool_max_idle: int = 8
+    websocket_pool_idle_timeout_seconds: float = 300.0
+    websocket_pool_key_headers: tuple[str, ...] = (
+        "authorization",
+        "cookie",
+        "x-api-key",
+        "api-key",
+        "openai-organization",
+        "openai-project",
+        "openai-beta",
+        "chatgpt-account-id",
+        "session-id",
+        "thread-id",
+    )
     max_request_body_bytes: int = 32 * 1024 * 1024
     retry_backoff_seconds: float = 0.25
     log_level: str = "INFO"
@@ -89,6 +104,19 @@ class Settings:
                 "WEBSOCKET_SEND_RESPONSE_PROCESSED",
                 cls.websocket_send_response_processed,
             ),
+            websocket_pool_enabled=_env_bool("WEBSOCKET_POOL_ENABLED", cls.websocket_pool_enabled),
+            websocket_pool_max_idle=max(0, _env_int("WEBSOCKET_POOL_MAX_IDLE", cls.websocket_pool_max_idle)),
+            websocket_pool_idle_timeout_seconds=max(
+                0.0,
+                _env_float(
+                    "WEBSOCKET_POOL_IDLE_TIMEOUT_SECONDS",
+                    cls.websocket_pool_idle_timeout_seconds,
+                ),
+            ),
+            websocket_pool_key_headers=_env_csv_tuple_lower(
+                "WEBSOCKET_POOL_KEY_HEADERS",
+                cls.websocket_pool_key_headers,
+            ),
             max_request_body_bytes=max(1, _env_int("MAX_REQUEST_BODY_BYTES", cls.max_request_body_bytes)),
             retry_backoff_seconds=max(0.0, _env_float("RETRY_BACKOFF_SECONDS", cls.retry_backoff_seconds)),
             log_level=_env_str("LOG_LEVEL", cls.log_level).upper(),
@@ -148,6 +176,10 @@ def _env_csv_tuple(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     if not parsed:
         raise ValueError(f"{name} cannot be empty")
     return parsed
+
+
+def _env_csv_tuple_lower(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(item.lower() for item in _env_csv_tuple(name, default))
 
 
 def _validate_upstream_base_url(value: str) -> None:

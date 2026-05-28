@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -22,6 +23,7 @@ from codex_reset_proxy.proxy import (
 )
 from codex_reset_proxy.websocket_bridge import (
     WebSocketBridgeError,
+    WebSocketBridgePool,
     WebSocketConnectFactory,
     build_upstream_ws_url,
     default_websocket_connect_factory,
@@ -43,6 +45,7 @@ async def proxy_endpoint(request: Request) -> Response:
     settings: Settings = request.app.state.settings
     client_factory: ClientFactory = request.app.state.client_factory
     websocket_connect_factory: WebSocketConnectFactory = request.app.state.websocket_connect_factory
+    websocket_pool: WebSocketBridgePool | None = request.app.state.websocket_pool
 
     try:
         body = await read_limited_body(request, settings.max_request_body_bytes)
@@ -61,6 +64,7 @@ async def proxy_endpoint(request: Request) -> Response:
                 url=build_upstream_ws_url(upstream_url),
                 headers=websocket_headers(request_headers),
                 body=body,
+                pool=websocket_pool,
             )
         except WebSocketBridgeError as exc:
             return PlainTextResponse(
@@ -114,6 +118,7 @@ def create_app(
     settings: Settings | None = None,
     client_factory: ClientFactory = default_client_factory,
     websocket_connect_factory: WebSocketConnectFactory = default_websocket_connect_factory,
+    websocket_pool: WebSocketBridgePool | None = None,
 ) -> Starlette:
     resolved_settings = settings or Settings.from_env()
     logging.basicConfig(
@@ -121,13 +126,27 @@ def create_app(
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    resolved_websocket_pool = websocket_pool
+    if resolved_websocket_pool is None and resolved_settings.websocket_pool_enabled:
+        resolved_websocket_pool = WebSocketBridgePool(resolved_settings, websocket_connect_factory)
+
+    @asynccontextmanager
+    async def lifespan(_: Starlette):
+        try:
+            yield
+        finally:
+            if resolved_websocket_pool is not None:
+                await resolved_websocket_pool.aclose()
+
     app = Starlette(
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
             Route("/{path:path}", proxy_endpoint, methods=PROXY_METHODS),
-        ]
+        ],
+        lifespan=lifespan,
     )
     app.state.settings = resolved_settings
     app.state.client_factory = client_factory
     app.state.websocket_connect_factory = websocket_connect_factory
+    app.state.websocket_pool = resolved_websocket_pool
     return app

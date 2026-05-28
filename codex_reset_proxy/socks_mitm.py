@@ -22,6 +22,7 @@ from codex_reset_proxy.proxy import (
 )
 from codex_reset_proxy.websocket_bridge import (
     WebSocketBridgeError,
+    WebSocketBridgePool,
     WebSocketConnectFactory,
     build_upstream_ws_url,
     default_websocket_connect_factory,
@@ -72,15 +73,23 @@ async def serve_socks5(
         logger.info("MITM CA certificate path: %s", ca_cert_path)
         logger.info("MITM CA key path: %s", ca_key_path)
 
-    server = await start_socks5_server(
-        settings,
-        client_factory=client_factory,
-        websocket_connect_factory=websocket_connect_factory,
+    websocket_pool = (
+        WebSocketBridgePool(settings, websocket_connect_factory) if settings.websocket_pool_enabled else None
     )
-    sockets = ", ".join(str(sock.getsockname()) for sock in (server.sockets or []))
-    logger.info("SOCKS5 server listening on %s", sockets)
-    async with server:
-        await server.serve_forever()
+    try:
+        server = await start_socks5_server(
+            settings,
+            client_factory=client_factory,
+            websocket_connect_factory=websocket_connect_factory,
+            websocket_pool=websocket_pool,
+        )
+        sockets = ", ".join(str(sock.getsockname()) for sock in (server.sockets or []))
+        logger.info("SOCKS5 server listening on %s", sockets)
+        async with server:
+            await server.serve_forever()
+    finally:
+        if websocket_pool is not None:
+            await websocket_pool.aclose()
 
 
 async def start_socks5_server(
@@ -88,12 +97,14 @@ async def start_socks5_server(
     *,
     client_factory: ClientFactory = default_client_factory,
     websocket_connect_factory: WebSocketConnectFactory = default_websocket_connect_factory,
+    websocket_pool: WebSocketBridgePool | None = None,
 ) -> asyncio.Server:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handle_socks_client(
             settings,
             client_factory,
             websocket_connect_factory,
+            websocket_pool,
             reader,
             writer,
         )
@@ -105,6 +116,7 @@ async def _handle_socks_client(
     settings: Settings,
     client_factory: ClientFactory,
     websocket_connect_factory: WebSocketConnectFactory,
+    websocket_pool: WebSocketBridgePool | None,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -119,6 +131,7 @@ async def _handle_socks_client(
                 settings,
                 client_factory,
                 websocket_connect_factory,
+                websocket_pool,
                 target,
                 reader,
                 writer,
@@ -214,6 +227,7 @@ async def _handle_mitm_connection(
     settings: Settings,
     client_factory: ClientFactory,
     websocket_connect_factory: WebSocketConnectFactory,
+    websocket_pool: WebSocketBridgePool | None,
     target: SocksTarget,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -238,7 +252,14 @@ async def _handle_mitm_connection(
     )
 
     if intercept and settings.transport_mode == "websocket_per_request":
-        await _write_websocket_bridge_response(settings, websocket_connect_factory, request, path, writer)
+        await _write_websocket_bridge_response(
+            settings,
+            websocket_connect_factory,
+            websocket_pool,
+            request,
+            path,
+            writer,
+        )
     else:
         await _write_http_proxy_response(settings, client_factory, request, path, writer)
 
@@ -355,6 +376,7 @@ async def _write_http_proxy_response(
 async def _write_websocket_bridge_response(
     settings: Settings,
     websocket_connect_factory: WebSocketConnectFactory,
+    websocket_pool: WebSocketBridgePool | None,
     request: HttpRequest,
     path: str,
     writer: asyncio.StreamWriter,
@@ -370,6 +392,7 @@ async def _write_websocket_bridge_response(
             url=build_upstream_ws_url(_upstream_url(settings, path)),
             headers=websocket_headers(filtered_request_headers_from_raw(settings, request.headers)),
             body=request.body,
+            pool=websocket_pool,
         )
     except WebSocketBridgeError as exc:
         await _write_fixed_response(

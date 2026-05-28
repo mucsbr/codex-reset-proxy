@@ -72,23 +72,38 @@ class FakeClient:
 
 
 class FakeWebSocket:
-    def __init__(self, messages: Iterable[str | bytes]) -> None:
+    def __init__(
+        self,
+        messages: Iterable[str | bytes] = (),
+        response_batches: Iterable[Iterable[str | bytes]] = (),
+    ) -> None:
         self.messages = list(messages)
+        self.response_batches = [list(batch) for batch in response_batches]
         self.sent: list[str] = []
         self.allow_send = asyncio.Event()
         self.allow_send.set()
         self.block_send_number: int | None = None
         self.recv_delay_seconds = 0.0
+        self.block_when_empty = False
+        self.closed = False
 
     async def send(self, message: str) -> None:
         if self.block_send_number == len(self.sent) + 1:
             await self.allow_send.wait()
         self.sent.append(message)
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            return
+        if payload.get("type") == "response.create" and self.response_batches:
+            self.messages.extend(self.response_batches.pop(0))
 
     async def recv(self) -> str | bytes:
         if self.recv_delay_seconds:
             await asyncio.sleep(self.recv_delay_seconds)
         if not self.messages:
+            if self.block_when_empty:
+                await asyncio.Event().wait()
             raise AssertionError("unexpected websocket recv")
         return self.messages.pop(0)
 
@@ -103,6 +118,7 @@ class FakeWebSocketContext:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         self.exited = True
+        self.websocket.closed = True
 
 
 @pytest.mark.asyncio
@@ -480,6 +496,137 @@ async def test_websocket_per_request_retries_until_first_message_before_streamin
 
 
 @pytest.mark.asyncio
+async def test_websocket_pool_reuses_idle_connection_for_same_auth_headers():
+    websocket = FakeWebSocket(
+        response_batches=[
+            [
+                json.dumps({"type": "response.created", "response": {"id": "resp-1"}}),
+                json.dumps({"type": "response.completed", "response": {"id": "resp-1"}}),
+            ],
+            [
+                json.dumps({"type": "response.created", "response": {"id": "resp-2"}}),
+                json.dumps({"type": "response.completed", "response": {"id": "resp-2"}}),
+            ],
+        ]
+    )
+    websocket.block_when_empty = True
+    context = FakeWebSocketContext(websocket)
+    calls: list[dict] = []
+
+    def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        calls.append({"url": url, "headers": headers, "settings": settings})
+        return context
+
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test/base",
+            transport_mode="websocket_per_request",
+            websocket_pool_enabled=True,
+            retry_backoff_seconds=0,
+        ),
+        websocket_connect_factory=websocket_connect_factory,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        first = await client.post(
+            "/responses",
+            headers={"authorization": "Bearer same", "x-request-id": "first"},
+            json={"model": "gpt-test", "input": [], "stream": True},
+        )
+        await _wait_for(lambda: len(websocket.sent) == 2)
+        await _wait_for(lambda: _websocket_pool_idle_count(app) == 1)
+
+        second = await client.post(
+            "/responses",
+            headers={"authorization": "Bearer same", "x-request-id": "second"},
+            json={"model": "gpt-test", "input": [], "stream": True},
+        )
+        await _wait_for(lambda: len(websocket.sent) == 4)
+        await _wait_for(lambda: _websocket_pool_idle_count(app) == 1)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "resp-1" in first.text
+    assert "resp-2" in second.text
+    assert len(calls) == 1
+    assert not context.exited
+    assert [json.loads(message)["type"] for message in websocket.sent] == [
+        "response.create",
+        "response.processed",
+        "response.create",
+        "response.processed",
+    ]
+
+    await app.state.websocket_pool.aclose()
+    assert context.exited
+
+
+@pytest.mark.asyncio
+async def test_websocket_pool_separates_connections_by_auth_headers():
+    first_websocket = FakeWebSocket(
+        response_batches=[
+            [
+                json.dumps({"type": "response.created", "response": {"id": "resp-a"}}),
+                json.dumps({"type": "response.completed", "response": {"id": "resp-a"}}),
+            ],
+        ]
+    )
+    first_websocket.block_when_empty = True
+    second_websocket = FakeWebSocket(
+        response_batches=[
+            [
+                json.dumps({"type": "response.created", "response": {"id": "resp-b"}}),
+                json.dumps({"type": "response.completed", "response": {"id": "resp-b"}}),
+            ],
+        ]
+    )
+    second_websocket.block_when_empty = True
+    contexts = [FakeWebSocketContext(first_websocket), FakeWebSocketContext(second_websocket)]
+    calls: list[dict] = []
+
+    def websocket_connect_factory(url: str, headers: list[tuple[str, str]], settings: Settings):
+        calls.append({"url": url, "headers": headers, "settings": settings})
+        return contexts[len(calls) - 1]
+
+    app = create_app(
+        Settings(
+            upstream_base_url="https://api.example.test/base",
+            transport_mode="websocket_per_request",
+            websocket_pool_enabled=True,
+            retry_backoff_seconds=0,
+        ),
+        websocket_connect_factory=websocket_connect_factory,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
+        first = await client.post(
+            "/responses",
+            headers={"authorization": "Bearer account-a"},
+            json={"model": "gpt-test", "input": [], "stream": True},
+        )
+        await _wait_for(lambda: len(first_websocket.sent) == 2)
+        await _wait_for(lambda: _websocket_pool_idle_count(app) == 1)
+
+        second = await client.post(
+            "/responses",
+            headers={"authorization": "Bearer account-b"},
+            json={"model": "gpt-test", "input": [], "stream": True},
+        )
+        await _wait_for(lambda: len(second_websocket.sent) == 2)
+        await _wait_for(lambda: _websocket_pool_idle_count(app) == 2)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(calls) == 2
+    assert not contexts[0].exited
+    assert not contexts[1].exited
+
+    await app.state.websocket_pool.aclose()
+    assert contexts[0].exited
+    assert contexts[1].exited
+
+
+@pytest.mark.asyncio
 async def test_websocket_per_request_rejects_invalid_json_before_connecting():
     calls: list[dict] = []
 
@@ -516,3 +663,15 @@ async def test_websocket_per_request_rejects_non_post_methods():
         response = await client.get("/responses")
 
     assert response.status_code == 405
+
+
+async def _wait_for(predicate, *, attempts: int = 50) -> None:
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition was not met")
+
+
+def _websocket_pool_idle_count(app) -> int:
+    return sum(len(bucket) for bucket in app.state.websocket_pool._idle.values())

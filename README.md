@@ -46,7 +46,7 @@ socks5://127.0.0.1:8788
 
 The proxy generates a local CA at `./certs/ca.crt` by default. Install that CA into the client trust store before using `socks5_mitm`; otherwise HTTPS certificate verification will fail. `socks5_mitm` only decrypts `INTERCEPT_HOST:443`. Within that host, only `INTERCEPT_PATHS` get the special HTTP fast-fail or WS bridge behavior; other paths are forwarded as ordinary HTTP. Other SOCKS5 CONNECT hosts are tunneled through `OUTBOUND_PROXY` unchanged.
 
-`TRANSPORT_MODE=http` keeps the existing 30s response-header fast-fail and retry behavior after MITM decrypts the request. `TRANSPORT_MODE=websocket_per_request` converts intercepted Codex Responses HTTP requests into one-shot upstream WebSocket requests.
+`TRANSPORT_MODE=http` keeps the existing 30s response-header fast-fail and retry behavior after MITM decrypts the request. `TRANSPORT_MODE=websocket_per_request` converts intercepted Codex Responses HTTP requests into upstream WebSocket requests. Set `WEBSOCKET_POOL_ENABLED=true` to reuse idle upstream WebSocket connections after each response is fully processed.
 
 To reinstall the generated CA into a rebuilt Alpine client container:
 
@@ -68,13 +68,15 @@ The default `TRANSPORT_MODE=http` is a generic HTTP reverse proxy. It works for 
 
 `TRANSPORT_MODE=websocket_per_request` is an experimental Codex Responses bridge:
 
-- each incoming HTTP `POST` opens one upstream WebSocket connection;
+- each incoming HTTP `POST` uses one upstream WebSocket connection at a time;
 - the upstream WebSocket URL is derived from `UPSTREAM_BASE_URL` plus the original path and query;
 - the HTTP JSON request body is wrapped as a WebSocket `response.create` message;
 - upstream WebSocket JSON messages are returned to the HTTP client as SSE events;
 - after `response.completed` is returned to the HTTP client, the proxy ends the client stream and sends `response.processed` to the upstream WebSocket in the background.
 
-This mode is only intended for the Codex Responses protocol. It is not a generic bridge for `/v1/chat/completions`. It also does not reduce connection count yet, because one HTTP request still creates one WebSocket connection. A later pooled mode would need to key long-lived WebSockets by auth/session headers and Codex thread/window headers.
+This mode is only intended for the Codex Responses protocol. It is not a generic bridge for `/v1/chat/completions`.
+
+When `WEBSOCKET_POOL_ENABLED=true`, completed WebSockets are returned to an idle pool after `response.processed` succeeds. A pooled WebSocket is still single-flight: it is never used by two incoming HTTP requests at the same time. Pool entries are keyed by the upstream WS URL and a SHA-256 digest of identity headers such as `Authorization`, `Cookie`, OpenAI/ChatGPT headers, and configured session/thread headers. If a pooled socket is stale, closed, fails to send, times out before its first response message, or has unexpected pending messages after processing, it is discarded and the request falls back to the normal retry path.
 
 ## Configuration
 
@@ -91,7 +93,7 @@ Environment variables:
 | `LISTEN_HOST` | `0.0.0.0` | Address to bind inside the container or local process. |
 | `LISTEN_PORT` | `8000` | Port to bind inside the container or local process. Compose maps `PROXY_PORT` to this. |
 | `OUTBOUND_PROXY` | unset | Optional upstream network exit. Currently supports `socks5://host:port` or `socks5h://host:port`. |
-| `TRANSPORT_MODE` | `http` | `http` for normal reverse proxying, or `websocket_per_request` for the one-shot Codex Responses WS bridge. |
+| `TRANSPORT_MODE` | `http` | `http` for normal reverse proxying, or `websocket_per_request` for the Codex Responses WS bridge. |
 | `INTERCEPT_HOST` | upstream host | Host intercepted by `socks5_mitm`, usually `chatgpt.com`. |
 | `INTERCEPT_PATHS` | `/backend-api/codex/responses` | Comma-separated origin paths intercepted by `socks5_mitm`. |
 | `MITM_CERT_DIR` | `/data/certs` | Directory inside the container where the generated CA and leaf certificates are stored. |
@@ -105,6 +107,10 @@ Environment variables:
 | `WEBSOCKET_IDLE_TIMEOUT_SECONDS` | `600` | Maximum idle wait for the next upstream WebSocket message in `websocket_per_request` mode. |
 | `WEBSOCKET_PROCESSED_TIMEOUT_SECONDS` | `10` | Timeout for sending `response.create` and `response.processed` WebSocket messages. |
 | `WEBSOCKET_SEND_RESPONSE_PROCESSED` | `true` | Whether to send `response.processed` after `response.completed` in `websocket_per_request` mode. |
+| `WEBSOCKET_POOL_ENABLED` | `false` | Whether to reuse completed upstream WebSocket connections in `websocket_per_request` mode. |
+| `WEBSOCKET_POOL_MAX_IDLE` | `8` | Maximum idle pooled WebSockets per pool key. Set `0` to disable retention. |
+| `WEBSOCKET_POOL_IDLE_TIMEOUT_SECONDS` | `300` | Maximum age of an idle WebSocket before it is discarded on checkout. |
+| `WEBSOCKET_POOL_KEY_HEADERS` | `authorization,cookie,x-api-key,api-key,openai-organization,openai-project,openai-beta,chatgpt-account-id,session-id,thread-id` | Comma-separated header names included in the pool identity digest. Header names containing `auth`, `token`, or `session`, and names prefixed with `openai-`, `x-openai-`, `chatgpt-`, or `x-chatgpt-` are also treated as identity headers. |
 | `MAX_REQUEST_BODY_BYTES` | `33554432` | Maximum buffered request body size. |
 | `RETRY_BACKOFF_SECONDS` | `0.25` | Delay between failed pre-header attempts. |
 | `LOG_LEVEL` | `INFO` | Python logging level. |

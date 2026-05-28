@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
@@ -24,6 +26,7 @@ WEBSOCKET_REQUEST_SKIP_HEADERS = {
     b"content-length",
     b"content-type",
 }
+WEBSOCKET_POOL_DRAIN_TIMEOUT_SECONDS = 0.01
 
 WebSocketConnectFactory = Callable[[str, list[tuple[str, str]], Settings], Any]
 
@@ -37,6 +40,21 @@ class WebSocketBridgeError(Exception):
         self.attempts = attempts
 
 
+@dataclass(frozen=True)
+class WebSocketPoolKey:
+    url: str
+    identity_digest: str
+
+
+@dataclass
+class IdleWebSocketBridge:
+    websocket: Any
+    context: Any
+    key: WebSocketPoolKey
+    created_at: float
+    last_used_at: float
+
+
 @dataclass
 class OpenedWebSocketBridge:
     websocket: Any
@@ -46,6 +64,156 @@ class OpenedWebSocketBridge:
     first_message: str | bytes | None = None
     attempts: int = 1
     close_owned_by_background: bool = False
+    pool: WebSocketBridgePool | None = None
+    pool_key: WebSocketPoolKey | None = None
+    reused_connection: bool = False
+
+
+class WebSocketBridgePool:
+    def __init__(self, settings: Settings, connect_factory: WebSocketConnectFactory) -> None:
+        self.settings = settings
+        self.connect_factory = connect_factory
+        self._idle: dict[WebSocketPoolKey, list[IdleWebSocketBridge]] = {}
+        self._lock = asyncio.Lock()
+
+    async def open_websocket_bridge(
+        self,
+        *,
+        url: str,
+        headers: list[tuple[str, str]],
+        body: bytes,
+    ) -> OpenedWebSocketBridge:
+        request = build_response_create_request(body)
+        key = websocket_pool_key(self.settings, url, headers)
+        idle = await self._checkout(key)
+        reused = idle is not None
+
+        if idle is None:
+            websocket, context = await _open_websocket_connection(
+                settings=self.settings,
+                connect_factory=self.connect_factory,
+                url=url,
+                headers=headers,
+            )
+        else:
+            websocket = idle.websocket
+            context = idle.context
+
+        try:
+            await _send_websocket_json(
+                websocket,
+                request,
+                timeout=self.settings.websocket_processed_timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            await _close_context_quietly(context)
+            raise WebSocketBridgeError(
+                status_code=504,
+                error_code="websocket_open_timeout",
+                message="timed out opening websocket or sending response.create",
+            ) from exc
+        except (OSError, WebSocketException) as exc:
+            await _close_context_quietly(context)
+            raise WebSocketBridgeError(
+                status_code=502,
+                error_code="websocket_open_error",
+                message=f"failed to open websocket: {exc.__class__.__name__}",
+            ) from exc
+        except Exception as exc:
+            await _close_context_quietly(context)
+            raise WebSocketBridgeError(
+                status_code=502,
+                error_code="websocket_open_error",
+                message=f"failed to open websocket: {exc.__class__.__name__}",
+            ) from exc
+
+        logger.info(
+            "websocket response.create sent url=%s pooled=%s key=%s",
+            url,
+            reused,
+            key.identity_digest[:12],
+        )
+        return OpenedWebSocketBridge(
+            websocket=websocket,
+            context=context,
+            url=url,
+            background_tasks=set(),
+            pool=self,
+            pool_key=key,
+            reused_connection=reused,
+        )
+
+    async def release(self, opened: OpenedWebSocketBridge) -> None:
+        if opened.pool_key is None:
+            await _close_context_quietly(opened.context)
+            return
+        if self.settings.websocket_pool_max_idle <= 0 or self.settings.websocket_pool_idle_timeout_seconds <= 0:
+            await _close_context_quietly(opened.context)
+            return
+        if not _websocket_appears_open(opened.websocket):
+            await _close_context_quietly(opened.context)
+            return
+        if await _websocket_has_unexpected_pending_message(opened.websocket):
+            await _close_context_quietly(opened.context)
+            return
+
+        now = time.monotonic()
+        idle = IdleWebSocketBridge(
+            websocket=opened.websocket,
+            context=opened.context,
+            key=opened.pool_key,
+            created_at=now,
+            last_used_at=now,
+        )
+        close_later: list[IdleWebSocketBridge] = []
+        async with self._lock:
+            bucket = self._idle.setdefault(opened.pool_key, [])
+            while len(bucket) >= self.settings.websocket_pool_max_idle:
+                close_later.append(bucket.pop(0))
+            bucket.append(idle)
+        for stale in close_later:
+            await _close_context_quietly(stale.context)
+        logger.info(
+            "websocket returned to pool url=%s key=%s",
+            opened.url,
+            opened.pool_key.identity_digest[:12],
+        )
+
+    async def aclose(self) -> None:
+        idle: list[IdleWebSocketBridge] = []
+        async with self._lock:
+            for bucket in self._idle.values():
+                idle.extend(bucket)
+            self._idle.clear()
+        for entry in idle:
+            await _close_context_quietly(entry.context)
+
+    async def _checkout(self, key: WebSocketPoolKey) -> IdleWebSocketBridge | None:
+        stale: list[IdleWebSocketBridge] = []
+        selected: IdleWebSocketBridge | None = None
+        now = time.monotonic()
+        async with self._lock:
+            bucket = self._idle.get(key)
+            while bucket:
+                candidate = bucket.pop()
+                if self._is_idle_entry_usable(candidate, now):
+                    selected = candidate
+                    break
+                stale.append(candidate)
+            if bucket == []:
+                self._idle.pop(key, None)
+
+        for entry in stale:
+            await _close_context_quietly(entry.context)
+
+        if selected is not None:
+            logger.info("websocket pool hit url=%s key=%s", key.url, key.identity_digest[:12])
+        return selected
+
+    def _is_idle_entry_usable(self, entry: IdleWebSocketBridge, now: float) -> bool:
+        if now - entry.last_used_at > self.settings.websocket_pool_idle_timeout_seconds:
+            return False
+        return _websocket_appears_open(entry.websocket)
 
 
 async def default_websocket_connect_factory(
@@ -137,6 +305,19 @@ def websocket_headers(raw_headers: list[tuple[bytes, bytes]]) -> list[tuple[str,
     ]
 
 
+def websocket_pool_key(settings: Settings, url: str, headers: list[tuple[str, str]]) -> WebSocketPoolKey:
+    key_header_names = {name.lower() for name in settings.websocket_pool_key_headers}
+    configured_key_header = settings.upstream_api_key_header.lower()
+    identity_headers = [
+        (name.lower(), value)
+        for name, value in headers
+        if _is_websocket_pool_identity_header(name.lower(), key_header_names, configured_key_header)
+    ]
+    identity_headers.sort()
+    digest_input = json.dumps(identity_headers, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return WebSocketPoolKey(url=url, identity_digest=hashlib.sha256(digest_input).hexdigest())
+
+
 async def open_websocket_bridge(
     *,
     settings: Settings,
@@ -146,14 +327,17 @@ async def open_websocket_bridge(
     body: bytes,
 ) -> OpenedWebSocketBridge:
     request = build_response_create_request(body)
-    context = connect_factory(url, headers, settings)
-    if inspect.isawaitable(context):
-        context = await context
+    websocket, context = await _open_websocket_connection(
+        settings=settings,
+        connect_factory=connect_factory,
+        url=url,
+        headers=headers,
+    )
 
     try:
-        websocket = await context.__aenter__()
-        await asyncio.wait_for(
-            websocket.send(json.dumps(request, separators=(",", ":"))),
+        await _send_websocket_json(
+            websocket,
+            request,
             timeout=settings.websocket_processed_timeout_seconds,
         )
     except asyncio.TimeoutError as exc:
@@ -189,6 +373,7 @@ async def open_websocket_bridge_with_retries(
     url: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    pool: WebSocketBridgePool | None = None,
 ) -> OpenedWebSocketBridge:
     last_error_code = "websocket_first_message_timeout"
     last_status_code = 504
@@ -200,13 +385,20 @@ async def open_websocket_bridge_with_retries(
     for attempt in range(1, settings.upstream_max_attempts + 1):
         opened: OpenedWebSocketBridge | None = None
         try:
-            opened = await open_websocket_bridge(
-                settings=settings,
-                connect_factory=connect_factory,
-                url=url,
-                headers=headers,
-                body=body,
-            )
+            if pool is None:
+                opened = await open_websocket_bridge(
+                    settings=settings,
+                    connect_factory=connect_factory,
+                    url=url,
+                    headers=headers,
+                    body=body,
+                )
+            else:
+                opened = await pool.open_websocket_bridge(
+                    url=url,
+                    headers=headers,
+                    body=body,
+                )
             opened.first_message = await asyncio.wait_for(
                 opened.websocket.recv(),
                 timeout=settings.websocket_first_message_timeout_seconds,
@@ -304,7 +496,7 @@ async def stream_websocket_as_sse(
                 return
     finally:
         if not opened.close_owned_by_background:
-            await _close_context_quietly(opened.context)
+            await _discard_or_close(opened)
 
 
 def _schedule_response_processed(
@@ -314,22 +506,23 @@ def _schedule_response_processed(
 ) -> None:
     opened.close_owned_by_background = True
     if not settings.websocket_send_response_processed:
-        task = asyncio.create_task(_close_context_quietly(opened.context))
+        task = asyncio.create_task(_release_or_close(opened))
     else:
-        task = asyncio.create_task(_send_response_processed_and_close(opened, settings, response_id))
+        task = asyncio.create_task(_send_response_processed_and_release(opened, settings, response_id))
     opened.background_tasks.add(task)
     task.add_done_callback(opened.background_tasks.discard)
 
 
-async def _send_response_processed_and_close(
+async def _send_response_processed_and_release(
     opened: OpenedWebSocketBridge,
     settings: Settings,
     response_id: str,
 ) -> None:
-    try:
-        await _send_response_processed(opened, settings, response_id)
-    finally:
-        await _close_context_quietly(opened.context)
+    processed_sent = await _send_response_processed(opened, settings, response_id)
+    if processed_sent:
+        await _release_or_close(opened)
+    else:
+        await _discard_or_close(opened)
 
 
 def _websocket_message_to_text(message: str | bytes) -> str:
@@ -365,18 +558,119 @@ def _completed_response_id(text: str) -> str | None:
     return None
 
 
+async def _open_websocket_connection(
+    *,
+    settings: Settings,
+    connect_factory: WebSocketConnectFactory,
+    url: str,
+    headers: list[tuple[str, str]],
+) -> tuple[Any, Any]:
+    context: Any | None = None
+    try:
+        context = connect_factory(url, headers, settings)
+        if inspect.isawaitable(context):
+            context = await context
+        websocket = await context.__aenter__()
+    except asyncio.TimeoutError as exc:
+        if context is not None:
+            await _close_context_quietly(context)
+        raise WebSocketBridgeError(
+            status_code=504,
+            error_code="websocket_open_timeout",
+            message="timed out opening websocket or sending response.create",
+        ) from exc
+    except (OSError, WebSocketException) as exc:
+        if context is not None:
+            await _close_context_quietly(context)
+        raise WebSocketBridgeError(
+            status_code=502,
+            error_code="websocket_open_error",
+            message=f"failed to open websocket: {exc.__class__.__name__}",
+        ) from exc
+    except Exception as exc:
+        if context is not None:
+            await _close_context_quietly(context)
+        raise WebSocketBridgeError(
+            status_code=502,
+            error_code="websocket_open_error",
+            message=f"failed to open websocket: {exc.__class__.__name__}",
+        ) from exc
+    return websocket, context
+
+
+async def _send_websocket_json(websocket: Any, payload: dict[str, Any], *, timeout: float) -> None:
+    await asyncio.wait_for(
+        websocket.send(json.dumps(payload, separators=(",", ":"))),
+        timeout=timeout,
+    )
+
+
+async def _release_or_close(opened: OpenedWebSocketBridge) -> None:
+    if opened.pool is None:
+        await _close_context_quietly(opened.context)
+        return
+    await opened.pool.release(opened)
+
+
+async def _discard_or_close(opened: OpenedWebSocketBridge) -> None:
+    await _close_context_quietly(opened.context)
+
+
+def _is_websocket_pool_identity_header(
+    name: str,
+    configured_key_headers: set[str],
+    configured_key_header: str,
+) -> bool:
+    if name == configured_key_header or name in configured_key_headers:
+        return True
+    if name.startswith(("openai-", "x-openai-", "chatgpt-", "x-chatgpt-")):
+        return True
+    return "auth" in name or "token" in name or "session" in name
+
+
+def _websocket_appears_open(websocket: Any) -> bool:
+    closed = getattr(websocket, "closed", None)
+    if isinstance(closed, bool):
+        return not closed
+
+    state = getattr(websocket, "state", None)
+    if state is None:
+        return True
+    state_name = getattr(state, "name", "")
+    if isinstance(state_name, str) and state_name.upper() in {"CLOSING", "CLOSED"}:
+        return False
+    return str(state).upper() not in {"CLOSING", "CLOSED"}
+
+
+async def _websocket_has_unexpected_pending_message(websocket: Any) -> bool:
+    try:
+        message = await asyncio.wait_for(websocket.recv(), timeout=WEBSOCKET_POOL_DRAIN_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return False
+    except Exception:
+        return True
+
+    text = _websocket_message_to_text(message)
+    logger.warning(
+        "discarding pooled websocket with unexpected pending message event=%s",
+        _event_type(text),
+    )
+    return True
+
+
 async def _send_response_processed(
     opened: OpenedWebSocketBridge,
     settings: Settings,
     response_id: str,
-) -> None:
+) -> bool:
     if not settings.websocket_send_response_processed:
-        return
+        return True
 
     request = {"type": "response.processed", "response_id": response_id}
     try:
-        await asyncio.wait_for(
-            opened.websocket.send(json.dumps(request, separators=(",", ":"))),
+        await _send_websocket_json(
+            opened.websocket,
+            request,
             timeout=settings.websocket_processed_timeout_seconds,
         )
     except Exception as exc:
@@ -385,6 +679,8 @@ async def _send_response_processed(
             response_id,
             exc.__class__.__name__,
         )
+        return False
+    return True
 
 
 def _format_sse(event_type: str, data: str) -> bytes:
