@@ -530,7 +530,12 @@ async def test_websocket_pool_reuses_idle_connection_for_same_auth_headers():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as client:
         first = await client.post(
             "/responses",
-            headers={"authorization": "Bearer same", "x-request-id": "first"},
+            headers={
+                "authorization": "Bearer same",
+                "session-id": "session-a",
+                "thread-id": "thread-a",
+                "x-request-id": "first",
+            },
             json={"model": "gpt-test", "input": [], "stream": True},
         )
         await _wait_for(lambda: len(websocket.sent) == 2)
@@ -538,7 +543,12 @@ async def test_websocket_pool_reuses_idle_connection_for_same_auth_headers():
 
         second = await client.post(
             "/responses",
-            headers={"authorization": "Bearer same", "x-request-id": "second"},
+            headers={
+                "authorization": "Bearer same",
+                "session-id": "session-b",
+                "thread-id": "thread-b",
+                "x-request-id": "second",
+            },
             json={"model": "gpt-test", "input": [], "stream": True},
         )
         await _wait_for(lambda: len(websocket.sent) == 4)

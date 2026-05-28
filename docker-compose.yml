@@ -36,7 +36,7 @@ services:
       WEBSOCKET_POOL_ENABLED: "${WEBSOCKET_POOL_ENABLED:-false}"
       WEBSOCKET_POOL_MAX_IDLE: "${WEBSOCKET_POOL_MAX_IDLE:-8}"
       WEBSOCKET_POOL_IDLE_TIMEOUT_SECONDS: "${WEBSOCKET_POOL_IDLE_TIMEOUT_SECONDS:-300}"
-      WEBSOCKET_POOL_KEY_HEADERS: "${WEBSOCKET_POOL_KEY_HEADERS:-authorization,cookie,x-api-key,api-key,openai-organization,openai-project,openai-beta,chatgpt-account-id,session-id,thread-id}"
+      WEBSOCKET_POOL_KEY_HEADERS: "${WEBSOCKET_POOL_KEY_HEADERS:-authorization,cookie,x-api-key,api-key,openai-organization,openai-project,chatgpt-account-id}"
       MAX_REQUEST_BODY_BYTES: "33554432"
       RETRY_BACKOFF_SECONDS: "0.25"
       LOG_LEVEL: "INFO"

@@ -38,10 +38,7 @@ class Settings:
         "api-key",
         "openai-organization",
         "openai-project",
-        "openai-beta",
         "chatgpt-account-id",
-        "session-id",
-        "thread-id",
     )
     max_request_body_bytes: int = 32 * 1024 * 1024
     retry_backoff_seconds: float = 0.25

@@ -623,9 +623,7 @@ def _is_websocket_pool_identity_header(
 ) -> bool:
     if name == configured_key_header or name in configured_key_headers:
         return True
-    if name.startswith(("openai-", "x-openai-", "chatgpt-", "x-chatgpt-")):
-        return True
-    return "auth" in name or "token" in name or "session" in name
+    return "auth" in name or "token" in name
 
 
 def _websocket_appears_open(websocket: Any) -> bool:

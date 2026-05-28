@@ -76,7 +76,7 @@ The default `TRANSPORT_MODE=http` is a generic HTTP reverse proxy. It works for 
 
 This mode is only intended for the Codex Responses protocol. It is not a generic bridge for `/v1/chat/completions`.
 
-When `WEBSOCKET_POOL_ENABLED=true`, completed WebSockets are returned to an idle pool after `response.processed` succeeds. A pooled WebSocket is still single-flight: it is never used by two incoming HTTP requests at the same time. Pool entries are keyed by the upstream WS URL and a SHA-256 digest of identity headers such as `Authorization`, `Cookie`, OpenAI/ChatGPT headers, and configured session/thread headers. If a pooled socket is stale, closed, fails to send, times out before its first response message, or has unexpected pending messages after processing, it is discarded and the request falls back to the normal retry path.
+When `WEBSOCKET_POOL_ENABLED=true`, completed WebSockets are returned to an idle pool after `response.processed` succeeds. A pooled WebSocket is still single-flight: it is never used by two incoming HTTP requests at the same time. Pool entries are keyed by the upstream WS URL and a SHA-256 digest of authentication/account headers such as `Authorization`, `Cookie`, API-key headers, OpenAI organization/project headers, and `chatgpt-account-id`. Request/session headers such as `thread-id` and `session-id` do not split the pool by default. If a pooled socket is stale, closed, fails to send, times out before its first response message, or has unexpected pending messages after processing, it is discarded and the request falls back to the normal retry path.
 
 ## Configuration
 
@@ -110,7 +110,7 @@ Environment variables:
 | `WEBSOCKET_POOL_ENABLED` | `false` | Whether to reuse completed upstream WebSocket connections in `websocket_per_request` mode. |
 | `WEBSOCKET_POOL_MAX_IDLE` | `8` | Maximum idle pooled WebSockets per pool key. Set `0` to disable retention. |
 | `WEBSOCKET_POOL_IDLE_TIMEOUT_SECONDS` | `300` | Maximum age of an idle WebSocket before it is discarded on checkout. |
-| `WEBSOCKET_POOL_KEY_HEADERS` | `authorization,cookie,x-api-key,api-key,openai-organization,openai-project,openai-beta,chatgpt-account-id,session-id,thread-id` | Comma-separated header names included in the pool identity digest. Header names containing `auth`, `token`, or `session`, and names prefixed with `openai-`, `x-openai-`, `chatgpt-`, or `x-chatgpt-` are also treated as identity headers. |
+| `WEBSOCKET_POOL_KEY_HEADERS` | `authorization,cookie,x-api-key,api-key,openai-organization,openai-project,chatgpt-account-id` | Comma-separated authentication/account header names included in the pool identity digest. Header names containing `auth` or `token` are also treated as identity headers. |
 | `MAX_REQUEST_BODY_BYTES` | `33554432` | Maximum buffered request body size. |
 | `RETRY_BACKOFF_SECONDS` | `0.25` | Delay between failed pre-header attempts. |
 | `LOG_LEVEL` | `INFO` | Python logging level. |
